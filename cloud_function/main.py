@@ -9,6 +9,7 @@ import os
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
 import requests
+import google.auth
 from google.cloud import secretmanager
 
 
@@ -30,6 +31,7 @@ OKTA_GROUP_ID = os.getenv("OKTA_GROUP_ID", "")
 DEEL_API_TOKEN_SECRET = os.getenv("DEEL_API_TOKEN_SECRET", "")
 OKTA_API_TOKEN_SECRET = os.getenv("OKTA_API_TOKEN_SECRET", "")
 OKTA_GROUP_ID_SECRET = os.getenv("OKTA_GROUP_ID_SECRET", "")
+SECRET_PROJECT_ID = os.getenv("SECRET_PROJECT_ID", "")
 
 # Long-term rules
 LONG_TERM_MIN_DAYS = int(os.getenv("LONG_TERM_MIN_DAYS", "30"))
@@ -39,7 +41,14 @@ _secret_cache: Dict[str, str] = {}
 
 
 def _get_project_id() -> str:
-    return os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT") or ""
+    project_id = SECRET_PROJECT_ID or os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT")
+    if project_id:
+        return project_id
+    try:
+        _, project_id = google.auth.default()
+        return project_id or ""
+    except Exception:
+        return ""
 
 
 def _get_secret_value(secret_name: str) -> Optional[str]:
@@ -47,11 +56,14 @@ def _get_secret_value(secret_name: str) -> Optional[str]:
         return None
     if secret_name in _secret_cache:
         return _secret_cache[secret_name]
-    project_id = _get_project_id()
-    if not project_id:
-        raise RuntimeError("GOOGLE_CLOUD_PROJECT not set; cannot access Secret Manager.")
+    if secret_name.startswith("projects/"):
+        name = f"{secret_name}/versions/latest"
+    else:
+        project_id = _get_project_id()
+        if not project_id:
+            raise RuntimeError("GOOGLE_CLOUD_PROJECT not set; cannot access Secret Manager.")
+        name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
     client = secretmanager.SecretManagerServiceClient()
-    name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
     response = client.access_secret_version(request={"name": name})
     value = response.payload.data.decode("utf-8")
     _secret_cache[secret_name] = value
@@ -309,13 +321,13 @@ def sync_okta_group(long_term_emails: Set[str], token: str) -> None:
 def time_off_tracking(request):  # noqa: ANN001
     """Cloud Function entrypoint."""
     logging.info("Fetching Deel time-off data")
+    global OKTA_GROUP_ID
     if not OKTA_ORG_URL:
         return ("OKTA_ORG_URL not set", 500)
 
     okta_group_id = _get_secret_value(OKTA_GROUP_ID_SECRET) or OKTA_GROUP_ID
     if not okta_group_id:
         return ("OKTA_GROUP_ID not set", 500)
-    global OKTA_GROUP_ID
     OKTA_GROUP_ID = okta_group_id
 
     okta_token = _get_secret_value(OKTA_API_TOKEN_SECRET)
